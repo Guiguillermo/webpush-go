@@ -57,107 +57,9 @@ type Subscription struct {
 // SendNotification sends a push notification to a subscriptions endpoint
 // Follows the Message Encryption for Web Push, and VAPID protocols
 func SendNotification(message []byte, s *Subscription, options *Options) (*http.Response, error) {
-	// Decode auth and p256
-	b64 := base64.RawURLEncoding
 
-	// Chrome bug appends "=" to the end
-	clientAuthSecret, err := b64.DecodeString(strings.TrimRight(s.Keys.Auth, "="))
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	clientPublicKey, err := b64.DecodeString(strings.TrimRight(s.Keys.P256dh, "="))
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// Generate 16 byte salt
-	salt, err := saltFunc()
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// P256 curve
-	curve := elliptic.P256()
-
-	// Generate the public / private key pair
-	privateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	publicKey := elliptic.Marshal(curve, x, y)
-
-	// Shared secret
-	publicKeyX, publicKeyY := elliptic.Unmarshal(curve, clientPublicKey)
-	if publicKeyY == nil {
-		return &http.Response{}, err
-	}
-
-	sx, _ := curve.ScalarMult(publicKeyX, publicKeyY, privateKey)
-	sharedSecret := sx.Bytes()
-
-	// HKDF
-	hash := sha256.New
-	info := []byte("Content-Encoding: auth\x00")
-
-	// Create the key derivation function
-	prkHKDF := hkdf.New(hash, sharedSecret, clientAuthSecret, info)
-	prk, err := getHKDFKey(prkHKDF, 32)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// Derive Content Encryption Key
-	contentEncryptionKeyInfo := getInfo([]byte("aesgcm"), clientPublicKey, publicKey)
-	contentHKDF := hkdf.New(hash, prk, salt, contentEncryptionKeyInfo)
-	contentEncryptionKey, err := getHKDFKey(contentHKDF, 16)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// Derive the Nonce
-	nonceInfo := getInfo([]byte("nonce"), clientPublicKey, publicKey)
-	nonceHKDF := hkdf.New(hash, prk, salt, nonceInfo)
-	nonce, err := getHKDFKey(nonceHKDF, 12)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// Cipher
-	c, err := aes.NewCipher(contentEncryptionKey)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	gcm, err := cipher.NewGCM(c)
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	// Padding
-	padding := make([]byte, 2)
-	plaintext := append(padding, message...)
-
-	// Encrypt
-	ciphertext := gcm.Seal([]byte{}, nonce, plaintext, nil)
-
-	// POST request
-	req, err := http.NewRequest("POST", s.Endpoint, ioutil.NopCloser(bytes.NewReader(ciphertext)))
-	if err != nil {
-		return &http.Response{}, err
-	}
-
-	req.Header.Set("Encryption", fmt.Sprintf("salt=%s", base64.RawURLEncoding.EncodeToString(salt)))
-	req.Header.Set("Crypto-Key", fmt.Sprintf("dh=%s", base64.RawURLEncoding.EncodeToString(publicKey)))
-	req.Header.Set("Content-Encoding", "aesgcm")
-	req.Header.Set("TTL", strconv.Itoa(options.TTL))
-
-	// Set VAPID headers
-	err = vapid(req, s, options)
-	if err != nil {
-		return &http.Response{}, err
-	}
+	// Prepare the request
+	req, err := GetPushRequest(message, s, options)
 
 	// Send the request
 	var client HTTPClient
@@ -173,6 +75,115 @@ func SendNotification(message []byte, s *Subscription, options *Options) (*http.
 	}
 
 	return resp, nil
+
+}
+
+// GetPushRequest prepares the push request without sending it
+func GetPushRequest(message []byte, s *Subscription, options *Options) (*http.Request, error) {
+	// Decode auth and p256
+	b64 := base64.RawURLEncoding
+
+	// Chrome bug appends "=" to the end
+	clientAuthSecret, err := b64.DecodeString(strings.TrimRight(s.Keys.Auth, "="))
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	clientPublicKey, err := b64.DecodeString(strings.TrimRight(s.Keys.P256dh, "="))
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// Generate 16 byte salt
+	salt, err := saltFunc()
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// P256 curve
+	curve := elliptic.P256()
+
+	// Generate the public / private key pair
+	privateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	publicKey := elliptic.Marshal(curve, x, y)
+
+	// Shared secret
+	publicKeyX, publicKeyY := elliptic.Unmarshal(curve, clientPublicKey)
+	if publicKeyY == nil {
+		return &http.Request{}, err
+	}
+
+	sx, _ := curve.ScalarMult(publicKeyX, publicKeyY, privateKey)
+	sharedSecret := sx.Bytes()
+
+	// HKDF
+	hash := sha256.New
+	info := []byte("Content-Encoding: auth\x00")
+
+	// Create the key derivation function
+	prkHKDF := hkdf.New(hash, sharedSecret, clientAuthSecret, info)
+	prk, err := getHKDFKey(prkHKDF, 32)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// Derive Content Encryption Key
+	contentEncryptionKeyInfo := getInfo([]byte("aesgcm"), clientPublicKey, publicKey)
+	contentHKDF := hkdf.New(hash, prk, salt, contentEncryptionKeyInfo)
+	contentEncryptionKey, err := getHKDFKey(contentHKDF, 16)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// Derive the Nonce
+	nonceInfo := getInfo([]byte("nonce"), clientPublicKey, publicKey)
+	nonceHKDF := hkdf.New(hash, prk, salt, nonceInfo)
+	nonce, err := getHKDFKey(nonceHKDF, 12)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// Cipher
+	c, err := aes.NewCipher(contentEncryptionKey)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	gcm, err := cipher.NewGCM(c)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	// Padding
+	padding := make([]byte, 2)
+	plaintext := append(padding, message...)
+
+	// Encrypt
+	ciphertext := gcm.Seal([]byte{}, nonce, plaintext, nil)
+
+	// POST request
+	req, err := http.NewRequest("POST", s.Endpoint, ioutil.NopCloser(bytes.NewReader(ciphertext)))
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	req.Header.Set("Encryption", fmt.Sprintf("salt=%s", base64.RawURLEncoding.EncodeToString(salt)))
+	req.Header.Set("Crypto-Key", fmt.Sprintf("dh=%s", base64.RawURLEncoding.EncodeToString(publicKey)))
+	req.Header.Set("Content-Encoding", "aesgcm")
+	req.Header.Set("TTL", strconv.Itoa(options.TTL))
+
+	// Set VAPID headers
+	err = vapid(req, s, options)
+	if err != nil {
+		return &http.Request{}, err
+	}
+
+	return req, err
+
 }
 
 // Returns a key of length "length" given an hkdf function
